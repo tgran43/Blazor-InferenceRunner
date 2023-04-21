@@ -1,0 +1,73 @@
+﻿@page "/login"
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Components.Server
+@using System.Security.Claims
+@using System.ComponentModel.DataAnnotations
+@inject UserManager<IdentityUser> UserManager
+@inject NavigationManager NavigationManager
+
+<EditForm Model="@userLogin" OnValidSubmit="HandleValidSubmit">
+    <DataAnnotationsValidator />
+    <ValidationSummary />
+    <div class="form-group">
+        <label for="email">Email:</label>
+        <InputText id="email" class="form-control" @bind-Value="userLogin.Email" />
+    </div>
+    <div class="form-group">
+        <label for="password">Password:</label>
+        <InputText id="password" type="password" class="form-control" @bind-Value="userLogin.Password" />
+    </div>
+    <button type="submit" class="btn btn-primary">Login</button>
+    @if (!string.IsNullOrEmpty(ErrorMessage))
+    {
+        <div class="alert alert-danger">@ErrorMessage</div>
+    }
+</EditForm>
+
+@code {
+    private UserLogin userLogin = new();
+    private string ErrorMessage { get; set; }
+    [Inject] private IServiceProvider ScopedServices { get; set; }
+
+    private async Task HandleValidSubmit()
+    {
+        var user = await UserManager.FindByEmailAsync(userLogin.Email);
+        if (user != null)
+        {
+            var result = await UserManager.CheckPasswordAsync(user, userLogin.Password);
+            if (result)
+            {
+                var authState = new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity(new[]
+                {
+                    new Claim(ClaimTypes.Name, user.UserName),
+                    new Claim(ClaimTypes.NameIdentifier, user.Id),
+            }, "ApplicationCookie")));
+
+                var authenticationStateTask = Task.FromResult(authState);
+                var authenticationStateProvider = (AuthenticationStateProvider)ScopedServices.GetService(typeof(AuthenticationStateProvider));
+                ((ServerAuthenticationStateProvider)authenticationStateProvider).SetAuthenticationState(authenticationStateTask);
+
+                NavigationManager.NavigateTo("/");
+            }
+            else
+            {
+                ErrorMessage = "Invalid email or password.";
+            }
+        }
+        else
+        {
+            ErrorMessage = "Invalid email or password.";
+        }
+    }
+
+    private class UserLogin
+    {
+        [Required]
+        [EmailAddress]
+        public string Email { get; set; }
+
+        [Required]
+        public string Password { get; set; }
+    }
+}

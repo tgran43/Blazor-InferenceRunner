@@ -1,0 +1,348 @@
+﻿@page "/inference"
+@inject IHubContext<InferenceHub> HubContext
+@using Blazor_web.Hubs
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.AspNetCore.SignalR
+@using SixLabors.ImageSharp
+@using SixLabors.ImageSharp.Processing
+@using SixLabors.ImageSharp.Formats.Png
+@using Blazor_web.OnnxRuntime.utils
+@using Tewr.Blazor.FileReader
+@using JsonSerializer = System.Text.Json.JsonSerializer;
+
+<div>
+    <img id="uploadedImage" src="data:image/png;base64,@ImageBase64" alt="Uploaded Image" />
+    <div id="predictions">
+        @if (Top10Predictions != null)
+        {
+            <h3>Predictions:</h3>
+            <ul>
+                @foreach (var prediction in Top10Predictions)
+                {
+                    <li>@prediction.Label: @prediction.Confidence</li>
+                }
+            </ul>
+        }
+    </div>
+    <div id="preprocessing">
+        <label for="brightness" id="brightnessL">Brightness:</label>
+        <input type="range" id="brightness" name="brightness" min="-100" max="100" value="@brightnessValue" @oninput="DebounceUpdateBrightness">
+
+        <label for="contrast" id="contrastL">Contrast:</label>
+        <input type="range" id="contrast" name="contrast" min="-100" max="100" value="0" @oninput="DebounceUpdateContrast">
+        <label for="resize" id="resizeL">Width:</label>
+        <input type="number" id="resize" name="resize" min="1" max="10000" value="@widthValue" @oninput="DebounceUpdateWidth">
+        <label for="resize" id="resizeL">Height:</label>
+        <input type="number" id="resize" name="resize" min="1" max="10000" value="@heightValue" @oninput="DebounceUpdateHeight">
+    </div>
+    <div id="error"> </div>
+
+    <EditForm Model="InputForm" OnValidSubmit="HandleValidSubmit">
+        <InputFile id="imageInput" name="uploadedImage" accept="image/png" OnChange="LoadImage" required />
+        <MudButton Disabled="@_processing" OnClick="HandleValidSubmit" Variant="Variant.Filled" EndIcon="@Icons.Material.Filled.Send" Color="MudBlazor.Color.Primary" >
+            @if (_processing)
+            {
+                <MudProgressCircular Class="ms-n1" Size="MudBlazor.Size.Small" Indeterminate="true" />
+                <MudText Class="ms-2">Processing</MudText>
+            }
+            else
+            {
+                <MudText>Run Inference</MudText>
+            }
+        </MudButton>
+    </EditForm>
+</div>
+
+@code {
+    private string ImageBase64 { get; set; }
+    private List<(string Label, float Confidence)> Top10Predictions { get; set; }
+    private string TempImagePath { get; set; }
+    private InputFormModel InputForm { get; set; } = new InputFormModel();
+    private int brightnessValue;
+    private int contrastValue;
+    private int widthValue = 0;
+    private int heightValue = 0;
+    public Image<Rgb24> UploadedImage { get; set; }
+    public Image<Rgb24> OriginalUploadedImage { get; set; }
+    private CancellationTokenSource _debounceCts;
+    private CancellationTokenSource _debounceContrastCts;
+    private CancellationTokenSource _debounceWidthCts;
+    private CancellationTokenSource _debounceHeightCts;
+    private bool _processing = false;
+
+    protected override void OnInitialized()
+    {
+        Top10Predictions = new List<(string Label, float Confidence)>();
+    }
+    async Task UpdateProcessing()
+    {
+        _processing = !_processing;
+    }
+    async Task ProcessSomething()
+    {
+        _processing = true;
+        await Task.Delay(1000);
+        _processing = false;
+    }
+    async Task HandleValidSubmit()
+    {
+        await UpdateProcessing();
+        try
+        {
+
+            Top10Predictions = new List<(string, float)>();
+
+            string modelFilePath = @"C:\Users\tgran\OneDrive - InFarm\repos\onnxruntime-csharp-cv-template\model\97418d48-6b61-431e-b471-2aa3eeedac71.onnx";
+
+            // Clone the UploadedImage to create a new image object for processing
+            using var clonedImage = UploadedImage.Clone();
+
+            var inputs = ImageHelper.GetImageTensorFromPath(clonedImage);
+            foreach (var input in inputs)
+            {
+                var top10 = ModelHelper.GetPredictions(input, modelFilePath);
+
+                // Print results to console and push updates to the client
+                Console.WriteLine("Top 10 predictions for ResNet50 v2...");
+                Console.WriteLine("--------------------------------------------------------------");
+                foreach (var t in top10)
+                {
+                    Console.WriteLine($"Label: {t.Label}, Confidence: {t.Confidence}");
+                    Top10Predictions.Add((t.Label, t.Confidence));
+
+                }
+                var predictionsJson = JsonSerializer.Serialize(Top10Predictions.Select(x => new { Label = x.Label, Confidence = x.Confidence }));
+                await HubContext.Clients.All.SendAsync("ReceivePredictions", predictionsJson);
+                Console.WriteLine($"Predictions: {predictionsJson}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"An error occurred: {ex.Message}");
+        }
+        finally
+        {
+            await UpdateProcessing();
+        }
+        
+    }
+
+    private async Task DebounceUpdateBrightness(ChangeEventArgs e)
+    {
+        int newValue = Convert.ToInt32(e.Value);
+
+        if (_debounceCts != null)
+        {
+            _debounceCts.Cancel();
+        }
+
+        _debounceCts = new CancellationTokenSource();
+
+        try
+        {
+            await Task.Delay(300, _debounceCts.Token); // 300 milliseconds debounce time
+            await UpdateBrightness(newValue);
+        }
+        catch (TaskCanceledException)
+        {
+            // Task was cancelled, no action needed
+        }
+    }
+    private async Task DebounceUpdateContrast(ChangeEventArgs e)
+    {
+        int newValue = Convert.ToInt32(e.Value);
+
+        if (_debounceContrastCts != null)
+        {
+            _debounceContrastCts.Cancel();
+        }
+
+        _debounceContrastCts = new CancellationTokenSource();
+
+        try
+        {
+            await Task.Delay(300, _debounceContrastCts.Token); // 300 milliseconds debounce time
+            await UpdateContrast(newValue);
+        }
+        catch (TaskCanceledException)
+        {
+            // Task was cancelled, no action needed
+        }
+    }
+
+    private async Task DebounceUpdateWidth(ChangeEventArgs e)
+    {
+        int newValue = 1;
+        try
+        {
+            newValue = Convert.ToInt32(e.Value); 
+        }
+        catch
+        {
+            newValue = 1;
+        }
+
+        if (_debounceWidthCts != null)
+        {
+            _debounceWidthCts.Cancel();
+        }
+
+        _debounceWidthCts = new CancellationTokenSource();
+
+        try
+        {
+            await Task.Delay(300, _debounceWidthCts.Token); // 300 milliseconds debounce time
+            await UpdateWidth(newValue);
+        }
+        catch (TaskCanceledException)
+        {
+            // Task was cancelled, no action needed
+        }
+    }
+
+    private async Task DebounceUpdateHeight(ChangeEventArgs e)
+    {
+        int newValue = 1;
+        try
+        {
+            newValue = Convert.ToInt32(e.Value);
+        }
+        catch
+        {
+            newValue = 1;
+        }
+
+        if (_debounceHeightCts != null)
+        {
+            _debounceHeightCts.Cancel();
+        }
+
+        _debounceHeightCts = new CancellationTokenSource();
+
+        try
+        {
+            await Task.Delay(300, _debounceHeightCts.Token); // 300 milliseconds debounce time
+            await UpdateHeight(newValue);
+        }
+        catch (TaskCanceledException)
+        {
+            // Task was cancelled, no action needed
+        }
+    }
+    public async Task UpdateBrightness(int newValue)
+    {
+        if (OriginalUploadedImage == null)
+        {
+            Console.WriteLine("Image not loaded yet.");
+            return;
+        }
+
+        brightnessValue = newValue;
+        ApplyTransformations();
+    }
+
+    public async Task UpdateContrast(int newValue)
+    {
+        if (OriginalUploadedImage == null)
+        {
+            Console.WriteLine("Image not loaded yet.");
+            return;
+        }
+
+        contrastValue = newValue;
+        ApplyTransformations();
+    }
+
+    public async Task UpdateWidth(int newValue)
+    {
+        if (OriginalUploadedImage == null)
+        {
+            Console.WriteLine("Image not loaded yet.");
+            return;
+        }
+
+        widthValue = newValue;
+        ApplyTransformations();
+    }
+
+    public async Task UpdateHeight(int newValue)
+    {
+        if (OriginalUploadedImage == null)
+        {
+            Console.WriteLine("Image not loaded yet.");
+            return;
+        }
+
+        heightValue = newValue;
+        ApplyTransformations();
+    }
+
+    private void ApplyTransformations()
+    {
+        UploadedImage = OriginalUploadedImage.Clone(x =>
+        {
+            x.Brightness(1 + (float)brightnessValue / 100);
+            x.Contrast(1 + (float)contrastValue / 100);
+            x.Resize(new ResizeOptions { Size = new SixLabors.ImageSharp.Size(widthValue, heightValue), Sampler = KnownResamplers.Lanczos3 });
+        });
+        UpdateImageBase64();
+    }
+
+    private void UpdateImageBase64()
+    {
+        var memoryStream = new MemoryStream();
+        UploadedImage.Save(memoryStream, new PngEncoder());
+        memoryStream.Seek(0, SeekOrigin.Begin);
+        byte[] imageBytes = memoryStream.ToArray();
+        ImageBase64 = Convert.ToBase64String(imageBytes);
+        memoryStream.Dispose(); // Call Dispose() manually after converting the image to Base64
+        StateHasChanged();
+    }
+
+
+    private async Task LoadImage(InputFileChangeEventArgs e)
+    {
+        // Ensure that the uploaded file is an image
+        var imageFile = e.File;
+        if (imageFile.ContentType.StartsWith("image/"))
+        {
+            // Read the image file into a MemoryStream
+            await using var ms = new MemoryStream();
+            await using var fileStream = imageFile.OpenReadStream(2 * 10234 * 1024);
+            await fileStream.CopyToAsync(ms);
+
+            // Reset the MemoryStream's position to the beginning
+            ms.Seek(0, SeekOrigin.Begin);
+
+            // Convert the image to a base64 string
+            var imageBytes = ms.ToArray();
+            ImageBase64 = Convert.ToBase64String(imageBytes);
+
+            // Set the uploaded image in the InputForm model
+            InputForm.UploadedImage = imageFile;
+            // Set the original uploaded image
+            OriginalUploadedImage = Image.Load<Rgb24>(ms);
+
+            // Initialize the UploadedImage with the OriginalUploadedImage
+            UploadedImage = OriginalUploadedImage.Clone();
+            widthValue = OriginalUploadedImage.Width;
+            heightValue = OriginalUploadedImage.Height;
+            // Trigger a re-render of the component to display the uploaded image
+            StateHasChanged();
+        }
+        else
+        {
+            // Display an error message if the uploaded file is not an image
+            Console.WriteLine("The uploaded file is not an image.");
+        }
+    }
+
+
+    public class InputFormModel
+    {
+        public IBrowserFile UploadedImage { get; set; }
+        public float Brightness { get; set; }
+        public float Contrast { get; set; }
+        public int ResizePercentage { get; set; }
+    }
+}
